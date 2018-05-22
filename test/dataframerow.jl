@@ -42,11 +42,6 @@ module TestDataFrameRow
     @test hash(DataFrameRow(df, 2)) == hash(DataFrameRow(df, 5))
     @test hash(DataFrameRow(df, 2)) != hash(DataFrameRow(df, 6))
 
-
-    # check that hashrows() function generates the same hashes as DataFrameRow
-    df_rowhashes, _ = DataFrames.hashrows(df, false)
-    @test df_rowhashes == [hash(dr) for dr in eachrow(df)]
-
     # test incompatible frames
     @test_throws UndefVarError DataFrameRow(df, 1) == DataFrameRow(df3, 1)
 

@@ -63,7 +63,11 @@ Base.hash(r::DataFrameRow, h::UInt = zero(UInt)) =
 # only the rows of the same DataFrame could be compared
 # rows are equal if they have the same values (while the row indices could differ)
 # if all non-missing values are equal, but there are missings, returns missing
-Base.:(==)(r1::DataFrameRow, r2::DataFrameRow) = isequal(r1, r2)
+Base.:(==)(r1::DataFrameRow, r2::DataFrameRow) = isequivalent(r1, r2)
+
+function isequivalent(r1::DataFrameRow, r2::DataFrameRow)
+    isequivalent_row(r1.df, r1.row, r2.df, r2.row)
+end
 
 function Base.isequal(r1::DataFrameRow, r2::DataFrameRow)
     isequal_row(r1.df, r1.row, r2.df, r2.row)
@@ -86,6 +90,33 @@ isequal_row(cols1::Tuple{Vararg{AbstractVector}}, r1::Int,
     isequal(cols1[1][r1], cols2[1][r2]) &&
         isequal_row(Base.tail(cols1), r1, Base.tail(cols2), r2)
 
+# table columns are passed as a tuple of vectors to ensure type specialization
+isequivalent_row(cols::Tuple{AbstractVector}, r1::Int, r2::Int) =
+    isequivalent(cols[1][r1], cols[1][r2])
+isequivalent_row(cols::Tuple{Vararg{AbstractVector}}, r1::Int, r2::Int) =
+    isequivalent(cols[1][r1], cols[1][r2]) && isequivalent_row(Base.tail(cols), r1, r2)
+
+isequivalent_row(cols1::Tuple{AbstractVector}, r1::Int, cols2::Tuple{AbstractVector}, r2::Int) =
+    isequivalent(cols1[1][r1], cols2[1][r2])
+isequivalent_row(cols1::Tuple{Vararg{AbstractVector}}, r1::Int,
+            cols2::Tuple{Vararg{AbstractVector}}, r2::Int) =
+    isequivalent(cols1[1][r1], cols2[1][r2]) &&
+        isequivalent_row(Base.tail(cols1), r1, Base.tail(cols2), r2)
+
+function isequivalent(x::Any, y::Any)
+    contentmatches = x == y
+    # isa Missing should be redundant
+    # but it gives much more efficient code on Julia 0.6
+    if contentmatches isa Missing || ismissing(contentmatches)
+        if (x isa Missing || ismissing(x)) && (y isa Missing || ismissing(y))
+            return true
+        else
+            return false
+        end
+    end
+    return contentmatches
+end
+
 function isequal_row(df1::AbstractDataFrame, r1::Int, df2::AbstractDataFrame, r2::Int)
     if df1 === df2
         if r1 == r2
@@ -96,6 +127,20 @@ function isequal_row(df1::AbstractDataFrame, r1::Int, df2::AbstractDataFrame, r2
     end
     @inbounds for (col1, col2) in zip(columns(df1), columns(df2))
         isequal(col1[r1], col2[r2]) || return false
+    end
+    return true
+end
+
+function isequivalent_row(df1::AbstractDataFrame, r1::Int, df2::AbstractDataFrame, r2::Int)
+    if df1 === df2
+        if r1 == r2
+            return true
+        end
+    elseif !(ncol(df1) == ncol(df2))
+        throw(ArgumentError("Rows of the tables that have different number of columns cannot be compared. Got $(ncol(df1)) and $(ncol(df2)) columns"))
+    end
+    @inbounds for (col1, col2) in zip(columns(df1), columns(df2))
+        isequivalent(col1[r1], col2[r2]) || return false
     end
     return true
 end

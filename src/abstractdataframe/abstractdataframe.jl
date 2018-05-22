@@ -439,7 +439,7 @@ end
 function _nonmissing!(res, col)
     # workaround until JuliaLang/julia#21256 is fixed
     eltype(col) >: Missing || return
-    
+
     @inbounds for (i, el) in enumerate(col)
         res[i] &= !ismissing(el)
     end
@@ -661,7 +661,7 @@ nonunique(df, 1)
 
 """
 function nonunique(df::AbstractDataFrame)
-    gslots = row_group_slots(df)[3]
+    gslots = row_group_slots(df)[2]
     # unique rows are the first encountered group representatives,
     # nonunique are everything else
     res = fill(true, nrow(df))

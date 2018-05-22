@@ -6,9 +6,7 @@ struct RowGroupDict{T<:AbstractDataFrame}
     df::T
     "number of groups"
     ngroups::Int
-    "row hashes"
-    rhashes::Vector{UInt}
-    "hashindex -> index of group-representative row"
+    "indices of group-representative rows"
     gslots::Vector{Int}
     "group index for each row"
     groups::Vector{Int}
@@ -20,125 +18,78 @@ struct RowGroupDict{T<:AbstractDataFrame}
     stops::Vector{Int}
 end
 
-# "kernel" functions for hashrows()
-# adjust row hashes by the hashes of column elements
-function hashrows_col!(h::Vector{UInt},
-                       n::Vector{Bool},
-                       v::AbstractVector{T}) where T
-    @inbounds for i in eachindex(h)
-        el = v[i]
-        h[i] = hash(el, h[i])
-        if T >: Missing && length(n) > 0
-            # el isa Missing should be redundant
-            # but it gives much more efficient code on Julia 0.6
-            n[i] |= (el isa Missing || ismissing(el))
-        end
-    end
-    h
-end
+"""
+    row_group_slot
 
-# should give the same hash as AbstractVector{T}
-function hashrows_col!(h::Vector{UInt},
-                       n::Vector{Bool},
-                       v::AbstractCategoricalVector{T}) where T
-    # TODO is it possible to optimize by hashing the pool values once?
-    @inbounds for (i, ref) in enumerate(v.refs)
-        h[i] = hash(CategoricalArrays.index(v.pool)[ref], h[i])
-    end
-    h
-end
+Helper function for RowGroupDict.
 
-# should give the same hash as AbstractVector{T}
-# enables efficient sequential memory access pattern
-function hashrows_col!(h::Vector{UInt},
-                       n::Vector{Bool},
-                       v::AbstractCategoricalVector{>: Missing})
-    # TODO is it possible to optimize by hashing the pool values once?
-    @inbounds for (i, ref) in enumerate(v.refs)
-        if ref == 0
-            h[i] = hash(missing, h[i])
-            length(n) > 0 && (n[i] = true)
-        else
-            h[i] = hash(CategoricalArrays.index(v.pool)[ref], h[i])
-        end
-    end
-    h
-end
+Returns a tuple:
+1) the number of row groups in a data table
+2) indices of group-representative rows, non-zero values are
+    the indices of the first row in a group
 
-# Calculate the vector of `df` rows hash values.
-function hashrows(df::AbstractDataFrame, skipmissing::Bool)
-    rhashes = zeros(UInt, nrow(df))
-    missings = fill(false, skipmissing ? nrow(df) : 0)
-    for col in columns(df)
-        hashrows_col!(rhashes, missings, col)
-    end
-    return (rhashes, missings)
-end
-
-# Helper function for RowGroupDict.
-# Returns a tuple:
-# 1) the number of row groups in a data table
-# 2) vector of row hashes
-# 3) slot array for a hash map, non-zero values are
-#    the indices of the first row in a group
-# Optional group vector is set to the group indices of each row
+Optional group vector is set to the group indices of each row
+"""
 function row_group_slots(df::AbstractDataFrame,
                          groups::Union{Vector{Int}, Nothing} = nothing,
                          skipmissing::Bool = false)
-    rhashes, missings = hashrows(df, skipmissing)
-    row_group_slots(ntuple(i -> df[i], ncol(df)), rhashes, missings, groups, skipmissing)
+
+    missings = fill(false, skipmissing ? nrow(df) : 0)
+    if skipmissing
+        for col in columns(df)
+            @inbounds for i in eachindex(col)
+                el = col[i]
+                # el isa Missing should be redundant
+                # but it gives much more efficient code on Julia 0.6
+                missings[i] |= (el isa Missing || ismissing(el))
+            end
+        end
+    end
+
+    row_group_slots(ntuple(i -> df[i], ncol(df)), missings, groups, skipmissing)
 end
 
 function row_group_slots(cols::Tuple{Vararg{AbstractVector}},
-                         rhashes::AbstractVector{UInt},
                          missings::AbstractVector{Bool},
                          groups::Union{Vector{Int}, Nothing} = nothing,
                          skipmissing::Bool = false)
     @assert groups === nothing || length(groups) == length(cols[1])
-    # inspired by Dict code from base cf. https://github.com/JuliaData/DataFrames.jl/pull/17#discussion_r102481481
-    sz = Base._tablesz(length(rhashes))
-    @assert sz >= length(rhashes)
-    szm1 = sz-1
-    gslots = zeros(Int, sz)
+
+    nrows = length(cols[1])
+    # Contains the indices of the starting row for each group
+    gslots = zeros(Int, nrows)
     # If missings are to be skipped, they will all go to group 1
     ngroups = skipmissing ? 1 : 0
-    @inbounds for i in eachindex(rhashes)
-        # find the slot and group index for a row
-        slotix = rhashes[i] & szm1 + 1
+
+    @inbounds for i in 1:nrows
         # Use 0 for non-missing values to catch bugs if group is not found
         gix = skipmissing && missings[i] ? 1 : 0
-        probe = 0
         # Skip rows contaning at least one missing (assigning them to group 0)
         if !skipmissing || !missings[i]
-            while true
-                g_row = gslots[slotix]
+
+            @inbounds for g_row in gslots # only need to compare againt indices that start groups
                 if g_row == 0 # unoccupied slot, current row starts a new group
-                    gslots[slotix] = i
                     gix = ngroups += 1
+                    gslots[skipmissing ? ngroups - 1 : ngroups] = i
                     break
-                elseif rhashes[i] == rhashes[g_row] # occupied slot, check if miss or hit
-                    if isequal_row(cols, i, g_row) # hit
-                        gix = groups !== nothing ? groups[g_row] : 0
-                    end
+                elseif isequivalent_row(cols, i, g_row) # hit, matches a previous group
+                    gix = groups !== nothing ? groups[g_row] : 0
                     break
                 end
-                slotix = slotix & szm1 + 1 # check the next slot
-                probe += 1
-                @assert probe < sz
             end
         end
         if groups !== nothing
             groups[i] = gix
         end
     end
-    return ngroups, rhashes, gslots
+    return ngroups, gslots
 end
 
 # Builds RowGroupDict for a given DataFrame.
 # Partly uses the code of Wes McKinney's groupsort_indexer in pandas (file: src/groupby.pyx).
 function group_rows(df::AbstractDataFrame, skipmissing::Bool = false)
     groups = Vector{Int}(undef, nrow(df))
-    ngroups, rhashes, gslots = row_group_slots(df, groups, skipmissing)
+    ngroups, gslots = row_group_slots(df, groups, skipmissing)
 
     # count elements in each group
     stops = zeros(Int, ngroups)
@@ -171,7 +122,7 @@ function group_rows(df::AbstractDataFrame, skipmissing::Bool = false)
         ngroups -= 1
     end
 
-    return RowGroupDict(df, ngroups, rhashes, gslots, groups, rperm, starts, stops)
+    return RowGroupDict(df, ngroups, gslots, groups, rperm, starts, stops)
 end
 
 # Find index of a row in gd that matches given row by content, 0 if not found
@@ -182,18 +133,9 @@ function findrow(gd::RowGroupDict,
                  row::Int)
     (gd.df === df) && return row # same table, return itself
     # different tables, content matching required
-    rhash = rowhash(df_cols, row)
-    szm1 = length(gd.gslots)-1
-    slotix = ini_slotix = rhash & szm1 + 1
-    while true
-        g_row = gd.gslots[slotix]
-        if g_row == 0 || # not found
-            (rhash == gd.rhashes[g_row] &&
-            isequal_row(gd_cols, g_row, df_cols, row)) # found
-            return g_row
-        end
-        slotix = (slotix & szm1) + 1 # miss, try the next slot
-        (slotix == ini_slotix) && break
+    @inbounds for g_row in 1:length(gd_cols[1])
+        isequivalent_row(gd_cols, g_row, df_cols, row) && return g_row  # hit
+        # miss, try the next slot
     end
     return 0 # not found
 end

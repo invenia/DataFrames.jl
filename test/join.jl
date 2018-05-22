@@ -1,7 +1,21 @@
 module TestJoin
     using Compat, Compat.Test, DataFrames
     using DataFrames: similar_missing
+    using TimeZones
+    import Base.==
+    import Base.hash
+    import Base.isequal
+
     const ≅ = isequal
+
+    type TestSum
+        x::Integer
+        y::Integer
+    end
+
+    Base.hash(a::TestSum, h::UInt) = hash(a.y, hash(a.x, hash(:TestSum, h)))
+    Base.isequal(a::TestSum, b::TestSum) = Base.isequal(hash(a), hash(b))
+    Base.:(==)(a::TestSum, b::TestSum) = (a.x + a.y) == (b.x + b.y)
 
     name = DataFrame(ID = Union{Int, Missing}[1, 2, 3],
                      Name = Union{String, Missing}["John Doe", "Jane Doe", "Joe Blogs"])
@@ -577,5 +591,23 @@ module TestJoin
                       a_1=vcat(fill(missing, nl), r[:a]))
         @test eltypes(join(l, r, on=:b, kind=:outer, makeunique=true)) ==
             [Union{Int, Missing}, CS, Union{Int, Missing}]
+    end
+
+    @testset "Test joins use ==" begin
+        sum1 = TestSum(1, 4)
+        sum2 = TestSum(2, 3)
+
+        @test sum1 == sum2
+        @test isequal(sum1, sum2) == false
+        @test (hash(sum1) == hash(sum2)) == false
+
+        df1 = DataFrame(:sum => sum1, :value => 1)
+        df2 = DataFrame(:sum => sum2, :value => 3)
+        df3 = DataFrame(:sum => sum1, :value => 3)
+
+        join1 = join(df1, df2, on=[:sum], kind = :left)
+        join2 = join(df1, df3, on=[:sum], kind = :left)
+
+        @test join1 == join2
     end
 end
