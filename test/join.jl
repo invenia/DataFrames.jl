@@ -8,7 +8,7 @@ module TestJoin
 
     const ≅ = isequal
 
-    type TestSum
+    struct TestSum
         x::Integer
         y::Integer
     end
